@@ -1,127 +1,188 @@
 <p align="center"><img src="docs/assets/aiscope-logo.svg" alt="AiScope" width="320"></p>
 
-# AiScope · visión
+# AiScope vision
 
-Modelo de detección de parásitos de malaria en fotos de microscopio tomadas con el móvil. Cada caja es un parásito: contar es contar cajas y reconocer es la clase de cada caja. Aquí sale el modelo exportado a LiteRT int8 y el contrato de entrada y salida que usará la app Android. La app funciona sin conexión: el modelo va dentro del APK y toda la inferencia ocurre en el teléfono.
+Object detection model for malaria parasites in blood smear photos taken with a phone held against a microscope eyepiece. Every box is one parasite, so counting parasites means counting boxes, and the class of each box is the parasite's life stage.
 
-## Estructura
+This repository covers everything up to the model that runs on the phone: data cleaning and splitting, training, evaluation, export to LiteRT and a reference implementation of the pre- and post-processing. The Android app that uses the model lives in [AIScope_android](https://github.com/guspei/AIScope_android).
 
-```
-dataset/        zips crudos (ignorado en git)
-data/           derivados: interim/ (índice), processed/ (splits, tiles) (ignorado en git)
-notebooks/      01_exploracion, 02_limpieza, 03_particion; cada uno se ejecuta de arriba abajo
-src/aiscope/
-  data/         índice de los zips, máscaras → instancias, leyenda de clases, exportación a YOLO, visualización
-  style.py      paleta y tipografía AiScope para figuras
-  benchmark.py  rendimiento de entrenamiento (img/s) y tamaño/latencia LiteRT int8 por modelo
-  train.py      entrenamiento (CLI, pensado para GPU remota)
-  evaluate.py   mAP por clase + MAE de conteo por imagen sobre test
-  export.py     exportación a LiteRT int8 y comparación antes/después de cuantizar
-models/         pesos, exportaciones y resultados de benchmark (ignorado en git salvo .gitkeep)
-docs/assets/    logos de AiScope (de GDD-app, licencia MIT)
-```
+This is research code. The model is not a diagnostic tool.
 
-## Entorno
+## Status
 
-Python 3.11. Las versiones directas están en `pyproject.toml` y el entorno completo resuelto en `requirements.lock`.
+The model exported today comes from a short local run: YOLO26n trained for 15 epochs on half of the training set. It is good enough to build and test the app against, not to draw conclusions about accuracy. A full training run on a cloud GPU is the next step, after which the model will be evaluated on the test split for the first time.
 
-```bash
-python3.11 -m venv .venv
-```
+## Data
 
-```bash
-.venv/bin/pip install -r requirements.lock && .venv/bin/pip install --no-deps -e .
-```
+The images were captured and annotated with [GDD-app](https://github.com/theaiscope/GDD-app), AiScope's data collection app. Each sample is a folder with `image_N.jpg`, a painted mask `mask_N.png` per image and a `metadata.json` (species, thin or thick smear, preparation details).
 
-Registrar el entorno como kernel de Jupyter (los notebooks piden el kernel «AiScope (.venv)»):
+The dataset is not included in this repository and is not public. The zips go in `dataset/`, or wherever the `AISCOPE_RAW` environment variable points.
 
-```bash
-.venv/bin/python -m ipykernel install --user --name aiscope --display-name "AiScope (.venv)"
-```
+After cleaning there are about 6,800 images:
 
-Notas de compatibilidad:
-- La exportación a LiteRT usa `litert-torch` (PyTorch → `.tflite` directo), que es la vía de Ultralytics desde la 8.4.83. No hace falta TensorFlow ni onnx2tf.
-- `torch==2.13.0`, porque `litert-torch` 0.9 exige `torch<2.14`.
-- `import aiscope` pone `YOLO_AUTOINSTALL=false`, así Ultralytics no instala paquetes por su cuenta y no rompe el entorno fijado.
-- En MPS, Ultralytics fuerza `workers=0`. `benchmark.py train --force-workers` los restaura.
-- Ultralytics es AGPL-3.0, así que la app que lo integre tiene que publicarse con licencia compatible.
+| | Images |
+|---|---|
+| Thick smear | 3,942 |
+| Thin smear | 2,864 |
+| *P. falciparum* | 2,526 |
+| *P. ovale* | 1,937 |
+| *P. malariae* | 1,393 |
+| *P. vivax* | 950 |
 
-## Datos
+and about 21,400 annotated objects:
 
-Los zips van en `dataset/`, o en la ruta que indique la variable `AISCOPE_RAW`. Cada carpeta UUID es una muestra con `image_N.jpg`, `mask_N.png` y `metadata.json`, tal como las sube la app de etiquetado [GDD-app](https://github.com/theaiscope/GDD-app).
+| Class id | Stage | Mask color | Boxes | Counted as parasite |
+|---|---|---|---|---|
+| 0 | ring | `#5CBFB0` | 10,133 | yes |
+| 1 | trophozoite | `#BFBE52` | 8,974 | yes |
+| 2 | schizont | `#BF6B49` | 919 | yes |
+| 3 | gametocyte | `#946FBF` | 1,138 | yes |
+| 4 | artefact | `#4F6FD0` | 213 | no |
 
-Leyenda (`src/aiscope/data/classes.py`, tomada de GDD-app):
+The colors, species codes and smear codes come from GDD-app (`src/aiscope/data/classes.py`). Species is a label of the whole sample, not of each box.
 
-| Color de máscara | Estadio | ¿Parásito? |
+The annotations are brush strokes, not boxes, and the brush size depends on the annotator's zoom level (`80 px / zoom`). Turning them into boxes is most of the cleaning work:
+
+| Notebook | What it does | Output |
 |---|---|---|
-| `#5CBFB0` | anillo (ring) | sí |
-| `#BFBE52` | trofozoíto | sí |
-| `#BF6B49` | esquizonte | sí |
-| `#946FBF` | gametocito | sí |
-| `#4F6FD0` | artefacto | no |
+| `01_exploracion` | Indexes the zips and looks at classes, object sizes, image quality and duplicates | `data/interim/{samples,images,instances}.parquet` |
+| `02_limpieza` | Tightens each stroke's box to the stained area inside it, splits scribbles that cover several parasites, drops images with mass annotations | `data/interim/{images_clean,boxes_clean}.parquet` |
+| `03_particion` | 70/15/15 train/val/test split and export to YOLO format | `data/processed/splits.parquet`, `data/processed/yolo/{campo_1280,mosaicos_640}` |
 
-- `metadata.species`: 1 *P. falciparum*, 2 *P. vivax*, 3 *P. ovale*, 4 *P. malariae*, 5 *P. knowlesi*.
-- `metadata.bloodType`: 1 extensión fina, 2 gota gruesa.
-- `preparation.sampleAge`: `fresh` o `old` (muestra antigua de laboratorio).
-- El pincel de anotación mide `80 px / zoom`, así que el tamaño del trazo depende del zoom del anotador y no del tamaño del parásito.
+The split is never done per image. Images are grouped into sessions (same health facility, microscopist and day) and whole sessions go to one split, so near-identical photos of the same slide cannot end up in both train and test. Exact duplicates always fall in the same session.
 
-Flujo de datos, un notebook detrás de otro:
-
-| Notebook | Qué hace | Salida |
-|---|---|---|
-| `01_exploracion` | índice de los zips, clases, tamaños, calidad | `data/interim/{samples,images,instances}.parquet` |
-| `02_limpieza` | trazos → cajas ajustadas a la zona teñida; parte garabatos; excluye anotaciones masivas | `data/interim/{images_clean,boxes_clean}.parquet` |
-| `03_particion` | train/val/test 70/15/15 por sesión (+ duplicados) y exportación YOLO | `data/processed/splits.parquet`, `data/processed/yolo/{campo_1280,mosaicos_640}` |
-
-Clases del detector (id → estadio): 0 anillo, 1 trofozoíto, 2 esquizonte, 3 gametocito, 4 artefacto.
-
-Ejecutar un notebook sin abrirlo:
+The notebooks are committed without outputs because their figures show sample photos from the dataset. Run them locally to see the figures:
 
 ```bash
 .venv/bin/jupyter nbconvert --to notebook --execute --inplace notebooks/02_limpieza.ipynb
 ```
 
-## Entrenamiento y evaluación
+## Model
 
-Variantes del experimento local: A = `yolo26n-p2` con el campo a 640; B = `yolo26n` con 4 mosaicos de 640; C = `yolo26n` con el campo a 1280.
+The detector is [YOLO26](https://docs.ultralytics.com/) nano from Ultralytics. The architecture is just a parameter (`yolo26n`, `yolo26n-p2`, `yolo26s`...), so it can be changed without touching the data or the evaluation.
+
+The phone photo is mostly black with a bright circle where the eyepiece field is. The input to the model is a square crop around that circle resized to 1280 x 1280. Three ways of feeding the image were compared in a short local run (15 epochs, 50 % of train, evaluated on val):
+
+| | A | B | C |
+|---|---|---|---|
+| Model | yolo26n-p2 | yolo26n | yolo26n |
+| Input | field at 640 | 4 tiles of 640 | field at 1280 |
+| mAP50 | 0.158 | 0.259 | 0.270 |
+| mAP50-95 | 0.083 | 0.148 | 0.165 |
+| Count MAE per image | 2.02 | 1.65 | 1.53 |
+
+C was kept. Artefacts get an AP of 0 in all three; there are too few of them.
+
+Evaluation always runs on the 1280 px field, so the three variants are scored on the same boxes. It reports mAP per class together with the mean absolute error of the parasite count per image (artefacts excluded). The confidence threshold for counting is chosen on val and reused on test.
+
+### Quantization
+
+Full int8 quantization (weights and activations) breaks this model. Quantizing only the weights (`w8a32`) keeps the accuracy and the file size small:
+
+| C on val | PyTorch | w8a32 | int8 |
+|---|---|---|---|
+| mAP50 | 0.270 | 0.270 | 0.132 |
+| Count MAE | 1.53 | 1.54 | 3.55 |
+
+The `w8a32` file is 2.99 MB. On an OPPO Find X5 Pro (Snapdragon 8 Gen 1) it runs in 72 ms per image on the GPU delegate and 235 ms on the CPU with 4 threads, measured with `benchmark_model`.
+
+## Setup
+
+Python 3.11. Direct dependencies are in `pyproject.toml` and the fully resolved environment in `requirements.lock`.
 
 ```bash
-.venv/bin/python -m aiscope.train --variant C --epochs 30 --device mps
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install --no-deps -e .
 ```
+
+The notebooks expect a Jupyter kernel called `aiscope`:
+
+```bash
+.venv/bin/python -m ipykernel install --user --name aiscope --display-name "AiScope (.venv)"
+```
+
+A few things worth knowing:
+
+- Export to LiteRT goes through `litert-torch` (PyTorch straight to `.tflite`), which Ultralytics uses since 8.4.83. TensorFlow and onnx2tf are not needed.
+- `torch` is pinned to 2.13.0 because `litert-torch` 0.9 requires `torch<2.14`.
+- Importing `aiscope` sets `YOLO_AUTOINSTALL=false` so Ultralytics does not install packages on its own and break the pinned environment.
+- On Apple silicon (MPS) Ultralytics forces `workers=0`. `benchmark.py train --force-workers` overrides that.
+
+## Usage
+
+Short local experiment comparing the variants:
+
+```bash
+.venv/bin/python -m aiscope.experiment --variants A B C --epochs 15 --fraction 0.5 --device mps
+```
+
+Training a single variant (on a CUDA machine, use `--device 0`):
+
+```bash
+.venv/bin/python -m aiscope.train --variant C --epochs 100 --device 0
+```
+
+Evaluation:
 
 ```bash
 .venv/bin/python -m aiscope.evaluate --weights models/runs/<run>/weights/best.pt --variant C --split val
 ```
 
-`evaluate.py` mide siempre sobre el campo a 1280 (mismas cajas para A, B y C) y da mAP por clase junto con el error absoluto medio del conteo de parásitos por imagen (sin artefactos). El umbral de conteo se elige en val y se reutiliza en test.
+Export to LiteRT and compare the metrics before and after quantization. Calibration uses training images only:
 
-## Modelo
+```bash
+.venv/bin/python -m aiscope.export --weights models/runs/<run>/weights/best.pt --variant C --quantize w8a32
+```
 
-Base: YOLO26 de Ultralytics, que no necesita NMS y exporta directo a LiteRT. La arquitectura es un parámetro (`yolo26n`, `yolo26n-p2`, `yolo26s`…), así que se puede cambiar sin tocar datos ni evaluación. Salir de la familia Ultralytics solo exige adaptar `train.py` y `export.py`; los datos siguen en formato YOLO.
+This writes `models/exported/<run>_w8a32.tflite` and `<run>_w8a32_contrato.json`, the file the app reads to know the input size, the classes and the threshold.
 
-Dónde se entrena: experimentos cortos en local (MPS) y entrenamientos completos en GPU CUDA en la nube, con el mismo código.
+Reference inference without Ultralytics, and generation of the golden test cases for the app (12 test images with their expected output):
 
-## Contrato del modelo para la app
+```bash
+.venv/bin/python -m aiscope.infer --model models/exported/<run>_w8a32.tflite --images photo.jpg
+.venv/bin/python -m aiscope.infer --model models/exported/<run>_w8a32.tflite --golden 12
+```
 
-Provisional, a falta de medir la latencia en un teléfono. La referencia ejecutable es [infer.py](src/aiscope/infer.py), que reproduce exactamente la salida de Ultralytics (48 cajas comparadas, IoU 1,000).
+## What the app has to do
 
-**Modelo**: `models/exported/<run>_w8a32.tflite`, 2,99 MB. Pesos en int8 y activaciones en float (`w8a32`). Cuantizar también las activaciones (`int8`) hunde la precisión: el mAP50 cae de 0,270 a 0,132 y el error de conteo sube de 1,53 a 3,55.
+`src/aiscope/infer.py` is the executable reference. It gives the same boxes as Ultralytics (48 boxes compared, IoU 1.000).
 
-**Entrada**
-1. Detectar el campo del ocular sobre la foto completa: mayor región con gris > 40 en una miniatura de 512 px, rellenar huecos y tomar el cuadrado que la envuelve ([field.py](src/aiscope/field.py)).
-2. Recortar ese cuadrado y llevarlo a 1280 × 1280 con interpolación bilineal.
-3. Tensor `[1, 3, 1280, 1280]` (NCHW), float32, valores en 0-1 (píxel / 255).
+Input:
 
-**Salida**: un tensor `[1, 9, 33600]`, con 4 coordenadas `xywh` normalizadas en 0-1 y 5 puntuaciones de clase. Postprocesado:
-1. Clase y confianza = máximo de las 5 puntuaciones.
-2. Multiplicar las coordenadas por 1280 y pasar a esquinas.
-3. NMS por clase con IoU 0,7, máximo 300 detecciones. **Hace falta**: la cabeza exportada es la de una a muchas, no la variante sin NMS de YOLO26.
-4. Contar las detecciones con confianza ≥ **0,25** (umbral elegido en val), excluyendo los artefactos.
+1. Find the eyepiece field on the full photo: largest region with gray level above 40 on a 512 px thumbnail, holes filled, and the square that encloses it (`src/aiscope/field.py`).
+2. Crop that square (anything outside the photo is black) and resize it to 1280 x 1280 with bilinear interpolation.
+3. Tensor `[1, 3, 1280, 1280]`, NCHW, float32, pixel / 255.
 
-**Clases**: 0 anillo, 1 trofozoíto, 2 esquizonte, 3 gametocito, 4 artefacto. El artefacto se detecta pero no suma en el conteo.
+Output is a `[1, 9, 33600]` tensor: normalized `cx, cy, w, h` followed by one score per class. Post-processing:
 
-**Ejecución en el teléfono**: delegado de GPU, con CPU (XNNPACK, 4 hilos) como respaldo. Medido con `benchmark_model` en un OPPO Find X5 Pro (Snapdragon 8 Gen 1, Android 16): 72 ms por imagen en GPU y 235 ms en CPU. La primera carga en GPU tarda unos 2 s. Resultados completos en `models/benchmarks/telefono_CPH2305.json`. Es un teléfono de gama alta; en un móvil medio hay que volver a medir.
+1. Class and confidence are the maximum of the 5 scores.
+2. Multiply the coordinates by 1280 and convert to corners.
+3. Per-class NMS with IoU 0.7, at most 300 detections. This is required: the exported head is the one-to-many branch, not YOLO26's NMS-free one.
+4. Count detections with confidence at or above 0.25, leaving artefacts out.
 
-**Sin conexión**: el `.tflite` va dentro del APK y el runtime de LiteRT se empaqueta en la app, no el de Google Play services.
+The app bundles the `.tflite` and the LiteRT runtime in the APK, so nothing needs a network connection.
 
-**Casos de prueba**: `models/exported/golden/` tiene 12 fotos completas con su salida esperada en `esperado.json`. La app debe reproducir esas detecciones y esos conteos.
+## Repository layout
+
+```
+dataset/        raw zips (not in git)
+data/           derived tables, splits and YOLO exports (not in git)
+notebooks/      01_exploracion, 02_limpieza, 03_particion
+src/aiscope/
+  data/         zip index, masks to instances, class legend, YOLO export, plotting helpers
+  field.py      eyepiece field detection and input preprocessing
+  train.py      training CLI
+  evaluate.py   mAP per class and count MAE
+  export.py     LiteRT export and before/after comparison
+  infer.py      reference inference and golden cases
+  benchmark.py  training throughput and LiteRT size/latency per model
+  experiment.py the A/B/C comparison
+  style.py      AiScope colors and fonts for figures
+models/         weights, exports and benchmark results (not in git)
+docs/assets/    AiScope logos, from GDD-app
+```
+
+## License
+
+Ultralytics YOLO is AGPL-3.0, so anything built on this code, including the app, has to be released under a compatible license. The AiScope logos in `docs/assets/` come from GDD-app, which is MIT licensed.
