@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiscope-vision"
+version = "0.1.0"
+description = "Detección, conteo y clasificación de parásitos en microscopía para móvil"
+requires-python = "==3.11.*"
+# Pines directos. El entorno completo resuelto está en requirements.lock.
+# Exportación a LiteRT con litert-torch (vía de Ultralytics >=8.4.83), sin TensorFlow ni onnx2tf.
+# torch 2.13: litert-torch 0.9 exige torch<2.14.
+dependencies = [
+    "ultralytics==8.4.152",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "litert-torch==0.9.4",
+    "ai-edge-litert==2.2.0",
+    "ai-edge-quantizer==0.9.0",
+    "numpy==2.4.6",
+    "scipy==1.17.1",
+    "pandas==3.0.5",
+    "pyarrow==25.0.1",
+    "matplotlib==3.11.2",
+    "opencv-python==5.0.0.93",
+    "pillow==12.3.0",
+    "PyYAML==6.0.3",
+    "jupyter==1.1.1",
+    "nbconvert==7.17.1",
+    "ipykernel==7.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

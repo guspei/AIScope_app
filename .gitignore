@@ -1,0 +1,16 @@
+# Datos crudos y derivados: nunca en git (solo en la raíz; src/aiscope/data es código)
+/dataset/
+/data/
+
+# Pesos, exportaciones y corridas
+models/*
+!models/.gitkeep
+runs/
+/*.tflite
+
+# Entorno
+.venv/
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
+.DS_Store

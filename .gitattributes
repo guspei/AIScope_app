@@ -1,0 +1,3 @@
+# Los notebooks se versionan sin salidas: las figuras contienen fotos de muestras del dataset.
+# Filtro local: git config filter.nbstrip.clean "jq --indent 1 '.cells |= map(del(.attachments) | if .cell_type == \"code\" then .outputs = [] | .execution_count = null else . end)'"
+*.ipynb filter=nbstrip
