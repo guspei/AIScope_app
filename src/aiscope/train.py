@@ -7,6 +7,9 @@ Variantes del experimento (datos exportados en notebooks/03_particion):
     A  yolo26n-p2  campo recortado a 640 (desde campo_1280)
     B  yolo26n     mosaicos de 640 (campo a 1200, 4 mosaicos con solape)
     C  yolo26n     campo recortado a 1280
+    E1 yolo26n     una clase (parásito), campo a 1280
+    E2 yolo26n     una clase, campo a 1920
+    E3 yolo26s     una clase, campo a 1280
 """
 from __future__ import annotations
 
@@ -26,6 +29,10 @@ VARIANTS = {
     "A": {"model": "yolo26n-p2", "data": PROCESSED_DIR / "yolo/campo_1280/data.yaml", "imgsz": 640, "batch": 16},
     "B": {"model": "yolo26n", "data": PROCESSED_DIR / "yolo/mosaicos_640/data.yaml", "imgsz": 640, "batch": 16},
     "C": {"model": "yolo26n", "data": PROCESSED_DIR / "yolo/campo_1280/data.yaml", "imgsz": 1280, "batch": 8},
+    # Detector de una clase (sin estadio, sin artefacto); datos del notebook 03, sección 6
+    "E1": {"model": "yolo26n", "data": PROCESSED_DIR / "yolo/parasito_1280/data.yaml", "imgsz": 1280, "batch": 8},
+    "E2": {"model": "yolo26n", "data": PROCESSED_DIR / "yolo/parasito_1920/data.yaml", "imgsz": 1920, "batch": 4},
+    "E3": {"model": "yolo26s", "data": PROCESSED_DIR / "yolo/parasito_1280/data.yaml", "imgsz": 1280, "batch": 8},
 }
 
 # Aumentos: el frotis no tiene orientación (volteos en ambos ejes); la tinción varía entre centros (HSV por defecto).

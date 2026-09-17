@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 import aiscope  # noqa: F401
-from aiscope.data.classes import CLASSES, NOT_PARASITE
+from aiscope.data.classes import NOT_PARASITE
 from aiscope.evaluate import MODES
 from aiscope.paths import MODELS_DIR
 
@@ -48,6 +48,7 @@ def main():
     quantize = {"8": 8, "float32": None}.get(a.quantize, a.quantize)
     sufijo = {"8": "int8", "w8a16": "w8a16", "w8a32": "w8a32", "float32": "float32"}[a.quantize]
     model = YOLO(str(weights))
+    names = [model.names[i] for i in sorted(model.names)]
     f = model.export(format="litert", quantize=quantize, data=str(data), split="train", fraction=fraction, imgsz=imgsz)
     tfl = Path(f)
     if tfl.is_dir():
@@ -66,7 +67,7 @@ def main():
                     "preproceso": ("recorte cuadrado del campo del ocular; se lleva a 1200 px y se parte en 4 mosaicos de 640 con 80 px de solape"
                                    if mode == "mosaicos" else "recorte cuadrado del campo del ocular redimensionado al lado de entrada")},
         "salida": {"tensor": "(1, 4 + nº de clases, anclajes): xywh normalizado 0-1 y una puntuación por clase",
-                   "clases": dict(enumerate(CLASSES)), "no_cuentan": NOT_PARASITE,
+                   "clases": dict(enumerate(names)), "no_cuentan": [n for n in names if n in NOT_PARASITE],
                    "postproceso": "NMS por clase con IoU 0.7 (la cabeza exportada es la de una a muchas)" +
                                   (" y, al unir los mosaicos, NMS por clase con IoU 0.5" if mode == "mosaicos" else "")},
         "umbral_conteo": conf,
@@ -91,7 +92,7 @@ def main():
                  ("ms/imagen", pt["ms_por_imagen"], q8["ms_por_imagen"])]
         print(f"\n{a.variant} · {a.quantize} · antes y después de cuantizar (val, umbral {conf})")
         for k, v_pt, v_q8 in filas:
-            print(f"  {k:<12} PyTorch {v_pt:>8.3f}   int8 {v_q8:>8.3f}   {v_q8 - v_pt:+.3f}")
+            print(f"  {k:<12} PyTorch {v_pt:>8.3f}   {sufijo:<7} {v_q8:>8.3f}   {v_q8 - v_pt:+.3f}")
 
 
 if __name__ == "__main__":

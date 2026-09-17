@@ -78,7 +78,7 @@ def decodificar(salida: np.ndarray, lado: int, conf_min: float) -> np.ndarray:
 
 
 class Detector:
-    """Modelo LiteRT int8 con su preproceso y postproceso."""
+    """Modelo LiteRT con su preproceso y postproceso; clases, umbral y modo salen del contrato."""
 
     def __init__(self, model: Path, contrato: dict | None = None, threads: int = 4):
         from ai_edge_litert.interpreter import Interpreter
@@ -91,6 +91,9 @@ class Detector:
         c = contrato or {}
         self.modo = c.get("entrada", {}).get("modo", "campo")
         self.umbral = c.get("umbral_conteo") or 0.25
+        clases = c.get("salida", {}).get("clases")
+        self.clases = [clases[k] for k in sorted(clases, key=int)] if clases else CLASSES
+        self.no_cuentan = c.get("salida", {}).get("no_cuentan", NOT_PARASITE)
 
     def _invoke(self, img: Image.Image) -> np.ndarray:
         self.interpreter.set_tensor(self.inp["index"], to_tensor(img))
@@ -115,14 +118,14 @@ class Detector:
             escala_campo = self.lado
 
         det = det[det[:, 4] >= self.umbral]
-        conteo = {c: int((det[:, 5] == i).sum()) for i, c in enumerate(CLASSES)}
+        conteo = {c: int((det[:, 5] == i).sum()) for i, c in enumerate(self.clases)}
         return {
             "campo": {"x0": x0, "y0": y0, "lado": lado, "lado_entrada": escala_campo},
             "umbral": self.umbral,
-            "detecciones": [{"clase": CLASSES[int(d[5])], "conf": round(float(d[4]), 4),
+            "detecciones": [{"clase": self.clases[int(d[5])], "conf": round(float(d[4]), 4),
                              "caja": [round(float(v), 1) for v in d[:4]]} for d in det],
             "conteo_por_clase": conteo,
-            "parasitos": int(sum(v for k, v in conteo.items() if k not in NOT_PARASITE)),
+            "parasitos": int(sum(v for k, v in conteo.items() if k not in self.no_cuentan)),
         }
 
 

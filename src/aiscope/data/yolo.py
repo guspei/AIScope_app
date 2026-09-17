@@ -98,3 +98,34 @@ def export_dataset(raw_dir: Path, images: pd.DataFrame, boxes: pd.DataFrame, spl
     data = {"path": str(out_dir.resolve()), **{k: f"images/{k}" for k in splits}, "names": dict(enumerate(class_names))}
     (out_dir / "data.yaml").write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
     return out_dir / "data.yaml"
+
+
+def relabel_dataset(src_dir: Path, out_dir: Path, class_names: list[str]) -> Path:
+    """Copia un export YOLO con otras clases: mismas imágenes (enlaces duros, sin duplicar disco) y etiquetas
+    reasignadas por nombre con `classes.class_map`; las cajas de clases que no existen en `class_names` se quitan.
+
+    Enlaces duros y no simbólicos: Ultralytics resuelve las rutas y leería las etiquetas del export original.
+    """
+    from aiscope.data.classes import class_map
+
+    src_dir, out_dir = Path(src_dir), Path(out_dir)
+    src = yaml.safe_load((src_dir / "data.yaml").read_text())
+    mapping = class_map([src["names"][i] for i in sorted(src["names"])], class_names)
+    splits = [k for k in ("train", "val", "test") if k in src]
+    for split in splits:
+        for kind in ("images", "labels"):
+            (out_dir / kind / split).mkdir(parents=True, exist_ok=True)
+        for img in (src_dir / "images" / split).glob("*.jpg"):
+            dst = out_dir / "images" / split / img.name
+            if not dst.exists():
+                os.link(img, dst)
+        for lbl in (src_dir / "labels" / split).glob("*.txt"):
+            lines = []
+            for line in lbl.read_text().splitlines():
+                c, *rest = line.split()
+                if int(c) in mapping:
+                    lines.append(" ".join([str(mapping[int(c)]), *rest]))
+            (out_dir / "labels" / split / lbl.name).write_text("\n".join(lines) + ("\n" if lines else ""))
+    data = {"path": str(out_dir.resolve()), **{k: f"images/{k}" for k in splits}, "names": dict(enumerate(class_names))}
+    (out_dir / "data.yaml").write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    return out_dir / "data.yaml"

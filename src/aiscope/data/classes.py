@@ -14,6 +14,22 @@ NOT_PARASITE = ["artefact"]
 # Orden de clases del detector (id = índice). El artefacto se entrena pero no suma en el conteo.
 CLASSES = PARASITE_STAGES + NOT_PARASITE
 
+# Detector sin estadio: una sola clase y el artefacto pasa a ser fondo.
+PARASITE = "parasite"
+SINGLE_CLASS = [PARASITE]
+
+
+def class_map(src: list[str], dst: list[str]) -> dict[int, int]:
+    """Ids de `src` → ids de `dst` por nombre. Los estadios caen en «parasite» si `dst` no los tiene; lo que no
+    existe en `dst` (p. ej. el artefacto en el detector de una clase) se descarta."""
+    out = {}
+    for i, name in enumerate(src):
+        if name in dst:
+            out[i] = dst.index(name)
+        elif name in PARASITE_STAGES and PARASITE in dst:
+            out[i] = dst.index(PARASITE)
+    return out
+
 STAGE_ES = {
     "ring": "anillo",
     "trophozoite": "trofozoíto",

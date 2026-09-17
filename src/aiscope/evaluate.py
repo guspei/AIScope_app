@@ -4,9 +4,13 @@
     python -m aiscope.evaluate --weights models/runs/<run>/weights/best.pt --variant C --split test   # usa el umbral de val
     python -m aiscope.evaluate --weights modelo_int8.tflite --mode campo --imgsz 1280 --split test --conf 0.3
 
-La referencia es siempre el campo recortado a 1280 px (data/processed/yolo/campo_1280), así A, B y C se miden
-sobre las mismas cajas. En modo mosaicos el campo se lleva a 1200 px, se parte en 4 mosaicos de 640 y las
-detecciones se unen con NMS por clase antes de medir.
+La referencia es siempre el campo recortado a 1280 px (data/processed/yolo/campo_1280), así todas las variantes se
+miden sobre las mismas cajas. En modo mosaicos el campo se lleva a 1200 px, se parte en 4 mosaicos de 640 y las
+detecciones se unen con NMS por clase antes de medir. Un modelo con entrada mayor (E2, 1920) predice sobre su propio
+export y sus cajas se llevan a la escala de 1280.
+
+Las clases salen del modelo (o del contrato, para un .tflite) y las cajas de referencia se reasignan por nombre: para
+el detector de una clase, los cuatro estadios son «parasite» y los artefactos se quitan.
 
 Conteo: parásitos = detecciones de estadios de parásito (no artefactos) con confianza ≥ umbral. El umbral se elige
 en val minimizando el MAE y se aplica tal cual en test.
@@ -20,9 +24,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 import aiscope  # noqa: F401
-from aiscope.data.classes import CLASSES, NOT_PARASITE
+from aiscope.data.classes import CLASSES, NOT_PARASITE, class_map
 from aiscope.data.yolo import tile_offsets
 from aiscope.paths import INTERIM_DIR, PROCESSED_DIR
 
@@ -31,7 +36,25 @@ REF_SIZE = 1280
 CONF_MIN = 0.001
 MAX_DET = 300
 PARASITE_IDS = [i for i, c in enumerate(CLASSES) if c not in NOT_PARASITE]
-MODES = {"A": ("campo", 640), "B": ("mosaicos", 640), "C": ("campo", 1280)}
+MODES = {"A": ("campo", 640), "B": ("mosaicos", 640), "C": ("campo", 1280),
+         "E1": ("campo", 1280), "E2": ("campo", 1920), "E3": ("campo", 1280)}
+SOURCES = {"E2": PROCESSED_DIR / "yolo" / "parasito_1920"}  # export del que se predice si no es la referencia
+
+
+def model_names(model, weights: Path) -> list[str]:
+    """Clases del modelo; un .tflite no las lleva dentro y se leen de su contrato."""
+    contrato = weights.with_name(f"{weights.stem}_contrato.json")
+    if weights.suffix == ".tflite" and contrato.exists():
+        clases = json.loads(contrato.read_text())["salida"]["clases"]
+        return [clases[k] for k in sorted(clases, key=int)]
+    return [model.names[i] for i in sorted(model.names)]
+
+
+def remap_gt(gt: np.ndarray, mapping: dict[int, int]) -> np.ndarray:
+    keep = np.array([int(c) in mapping for c in gt[:, 0]], dtype=bool)
+    gt = gt[keep].copy()
+    gt[:, 0] = [mapping[int(c)] for c in gt[:, 0]]
+    return gt
 
 
 def load_gt(lbl_path: Path, size: int = REF_SIZE) -> np.ndarray:
@@ -131,6 +154,7 @@ def main():
     ap.add_argument("--conf", type=float, help="umbral de conteo; por defecto el elegido en val (o se elige si split=val)")
     ap.add_argument("--device", default="mps")
     ap.add_argument("--limit", type=int, help="evaluar solo N imágenes (prueba rápida)")
+    ap.add_argument("--src", help="export YOLO del que se predice (por defecto, el de la variante o campo_1280)")
     ap.add_argument("--out")
     a = ap.parse_args()
 
@@ -145,7 +169,12 @@ def main():
     weights = Path(a.weights)
     out_dir = Path(a.out) if a.out else (weights.parent.parent if weights.parent.name == "weights" else weights.parent)
     model = YOLO(str(weights), task="detect")
-    paths = sorted((REF_DIR / "images" / a.split).glob("*.jpg"))[: a.limit]
+    names = model_names(model, weights)
+    mapping = class_map(CLASSES, names)
+    par_ids = [i for i, c in enumerate(names) if c not in NOT_PARASITE]
+    src = Path(a.src) if a.src else SOURCES.get(a.variant, REF_DIR)
+    paths = sorted((src / "images" / a.split).glob("*.jpg"))[: a.limit]
+    src_side = Image.open(paths[0]).width if paths else REF_SIZE
     images = pd.read_parquet(INTERIM_DIR / "images_clean.parquet")[["image_id", "preparacion", "especie"]]
     images["stem"] = images["image_id"].str.replace("/", "_", regex=False)
     iouv = np.linspace(0.5, 0.95, 10)
@@ -154,19 +183,21 @@ def main():
     es_tflite = weights.suffix == ".tflite"
     stats, rows, t0 = [], [], time.perf_counter()
     for p, preds in predict(model, paths, mode, imgsz, "cpu" if es_tflite else a.device, batch=1 if es_tflite else 8):
-        gt = load_gt(REF_DIR / "labels" / a.split / f"{p.stem}.txt")
+        if mode == "campo" and src_side != REF_SIZE:
+            preds[:, :4] *= REF_SIZE / src_side
+        gt = remap_gt(load_gt(REF_DIR / "labels" / a.split / f"{p.stem}.txt"), mapping)
         stats.append((match(preds, gt, iouv), preds[:, 4], preds[:, 5], gt[:, 0]))
-        par = np.isin(preds[:, 5], PARASITE_IDS)
-        row = {"stem": p.stem, "gt": int(np.isin(gt[:, 0], PARASITE_IDS).sum())}
+        par = np.isin(preds[:, 5], par_ids)
+        row = {"stem": p.stem, "gt": int(np.isin(gt[:, 0], par_ids).sum())}
         row.update({f"pred_{t:.2f}": int((par & (preds[:, 4] >= t)).sum()) for t in grid})
         rows.append(row)
     elapsed = time.perf_counter() - t0
 
     tp, conf, pcls, tcls = (np.concatenate(x, 0) for x in zip(*stats))
-    res = ap_per_class(tp, conf, pcls, tcls, names=dict(enumerate(CLASSES)))
+    res = ap_per_class(tp, conf, pcls, tcls, names=dict(enumerate(names)))
     p_, r_, ap, uniq = res[2], res[3], res[5], res[6].astype(int)
     per_class = pd.DataFrame({
-        "clase": [CLASSES[c] for c in uniq], "cajas": [int((tcls == c).sum()) for c in uniq],
+        "clase": [names[c] for c in uniq], "cajas": [int((tcls == c).sum()) for c in uniq],
         "P": p_.round(3), "R": r_.round(3), "mAP50": ap[:, 0].round(3), "mAP50-95": ap.mean(1).round(3),
     })
 
@@ -182,7 +213,7 @@ def main():
     thr = float(min(grid, key=lambda t: abs(t - thr)))
 
     report = {
-        "weights": str(weights), "split": a.split, "modo": mode, "imgsz": imgsz, "imagenes": len(paths),
+        "weights": str(weights), "split": a.split, "modo": mode, "imgsz": imgsz, "imagenes": len(paths), "clases": names,
         "ms_por_imagen": round(1000 * elapsed / max(len(paths), 1), 1),
         "deteccion": {"mAP50": float(ap[:, 0].mean()), "mAP50-95": float(ap.mean()), "por_clase": per_class.to_dict("records")},
         "conteo": {"umbral": thr, "origen_umbral": origen, **count_metrics(counts, thr),
